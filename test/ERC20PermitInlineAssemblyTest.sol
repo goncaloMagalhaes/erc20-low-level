@@ -5,6 +5,8 @@ import "forge-std/Test.sol";
 import "../src/ERC20PermitInlineAssembly.sol";
 
 contract ERC20PermitInlineAssemblyTest is Test {
+    event Approval(address indexed owner, address indexed spender, uint256 amount);
+
     address eoa = address(100);
 
     string name = "Test Token Name";
@@ -50,8 +52,16 @@ contract ERC20PermitInlineAssemblyTest is Test {
     }
 
     function testApprove() public {
+        address otherUser = address(200);
         vm.startPrank(eoa);
-        assertTrue(true);
+        
+        vm.expectEmit(true, true, false, true);
+        emit Approval(eoa, otherUser, amountMintEoa);
+        
+        erc20.approve(otherUser, amountMintEoa);
+
+        assertEq(erc20.allowance(eoa, otherUser), amountMintEoa);
+
         vm.stopPrank();
     }
 }

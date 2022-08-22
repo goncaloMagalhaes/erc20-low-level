@@ -185,6 +185,26 @@ contract ERC20PermitInlineAssembly {
         }
     }
 
+    function allowance(address owner, address spender) public view returns (uint256) {
+        // return _allowance[owner][spender];
+        assembly {
+            let fmp := mload(0x40)
+
+            mstore(fmp, owner)
+            mstore(add(fmp, 0x20), _allowance.slot)
+            let allowancesOwnerSlot := keccak256(fmp, 0x40)
+            
+            fmp := add(fmp, 0x40)
+            mstore(fmp, spender)
+            mstore(add(fmp, 0x20), allowancesOwnerSlot)
+
+            let memResultOffset := add(fmp, 0x40)
+            mstore(memResultOffset, sload(keccak256(fmp, 0x40)))
+
+            return(memResultOffset, 0x20)
+        }
+    }
+
     /*//////////////////////////////////////////////////////////////
                             WRITE FUNCTIONS
     //////////////////////////////////////////////////////////////*/
@@ -220,8 +240,8 @@ contract ERC20PermitInlineAssembly {
 
             // Return true
             let returnPointer := add(amountPointer, 0x20)
-            mstore8(returnPointer, 0x01)
-            return(returnPointer, 0x01)
+            mstore(returnPointer, 0x01)
+            return(returnPointer, 0x20)
         }
     }
 
