@@ -4,13 +4,19 @@ pragma solidity ^0.8.13;
 import "forge-std/console2.sol";
 
 /**
-    NOTE: STRING STORAGE CHECK between <32bytes and >=32bytes, according to docs:
+    NOTE on strings: STRING STORAGE CHECK between <32bytes and >=32bytes, according to docs:
     "In particular: if the data is at most 31 bytes long, the elements are stored 
     in the higher-order bytes (left aligned) and the lowest-order byte stores the 
     value length * 2. For byte arrays that store data which is 32 or more bytes long, 
     the main slot p stores length * 2 + 1 and the data is stored as usual in keccak256(p). 
     This means that you can distinguish a short array from a long array by checking 
     if the lowest bit is set: short (not set) and long (set)."
+
+    NOTE on mappings: The value corresponding to a mapping key k is located at keccak256(h(k) . p) 
+    where . is concatenation and h is a function that is applied to the 
+    key depending on its type:
+    - for value types, h pads the value to 32 bytes in the same way as when storing the value in memory.
+    - for strings and byte arrays, h(k) is just the unpadded data.
  */
 
 contract ERC20PermitInlineAssembly {
@@ -157,6 +163,28 @@ contract ERC20PermitInlineAssembly {
         }
     }
 
+    function totalSupply() public view returns (uint256) {
+        assembly {
+            let fmp := mload(0x40)
+            mstore(fmp, sload(_totalSupply.slot))
+            return(fmp, 0x20)
+        }
+    }
+
+    function balanceOf(address user) public view returns (uint256) {
+        assembly {
+            let fmp := mload(0x40)
+            
+            mstore(fmp, user)
+            mstore(add(fmp, 0x20), _balanceOf.slot)
+
+            let memResultOffset := add(fmp, 0x40)
+            mstore(memResultOffset, sload(keccak256(fmp, 0x40)))
+
+            return(memResultOffset, 0x20)
+        }
+    }
+
     /*//////////////////////////////////////////////////////////////
                             WRITE FUNCTIONS
     //////////////////////////////////////////////////////////////*/
@@ -233,6 +261,10 @@ contract ERC20PermitInlineAssembly {
         emit Transfer(from, to, amount);
 
         return true;
+    }
+
+    function mint(address to, uint256 amount) external {
+        _mint(to, amount);
     }
 
     /*//////////////////////////////////////////////////////////////
