@@ -246,19 +246,45 @@ contract ERC20PermitInlineAssembly {
     }
 
     function transfer(address to, uint256 amount) public returns (bool) {
-        // This is not needed, because without it it will lead to underflow error
-        // require(balanceOf(msg.sender) >= amount, "Not enough funds");
-        _balanceOf[msg.sender] -= amount;
+        assembly {
+            let fmp := mload(0x40)
+            mstore(fmp, caller())  // caller() --> msg.sender
+            mstore(add(fmp, 0x20), _balanceOf.slot)  // to have concatenation (caller . slot)
 
-        // Cannot overflow because the sum of all user
-        // balances can't exceed the max uint256 value.
-        unchecked {
-            _balanceOf[to] += amount;
+            let userBalanceSlot := keccak256(fmp, 0x40)
+            let userBalance := sload(userBalanceSlot)
+
+            // require(balanceOf(msg.sender) >= amount, "Not enough funds");
+            if lt(userBalance, amount) {
+                mstore(fmp, 0x08c379a0)  // function selector for Error(string)
+                mstore(add(fmp, 0x20), 0x20)  // string offset
+                mstore(add(fmp, 0x40), 0x10)  // length("Not enough funds") = 16 bytes -> 0x10
+                mstore(add(fmp, 0x60), 0x4e6f7420656e6f7567682066756e647300000000000000000000000000000000)  // "Not enough funds"
+                revert(add(fmp, 0x1c), sub(0x80, 0x1c))  // starts in the function selector bytes, which start at (fmp + 28bytes) 
+            }
+
+            sstore(userBalanceSlot, sub(userBalance, amount))  // update msg.sender balance
+
+            mstore(fmp, to)  // to change concatenation to (to . slot)
+            sstore(keccak256(fmp, 0x40), amount)  // update to balance
+
+            // Emit event Transfer(address indexed from, address indexed to, uint256 amount)
+            let amountPointer := add(fmp, 0x40)
+            mstore(amountPointer, amount)
+            // hash string is keccak256("Transfer(address,address,uint256)")
+            log3(
+                amountPointer,
+                0x20,
+                0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef,
+                caller(),
+                to
+            )
+
+            // Return true
+            let returnPointer := add(amountPointer, 0x20)
+            mstore(returnPointer, 0x01)
+            return(returnPointer, 0x20)
         }
-
-        emit Transfer(msg.sender, to, amount);
-
-        return true;
     }
 
     function transferFrom(
@@ -266,7 +292,7 @@ contract ERC20PermitInlineAssembly {
         address to,
         uint256 amount
     ) public returns (bool) {
-        uint256 allowed = _allowance[from][msg.sender]; // Saves gas for limited approvals.
+        /* uint256 allowed = _allowance[from][msg.sender]; // Saves gas for limited approvals.
 
         if (allowed != type(uint256).max) _allowance[from][msg.sender] = allowed - amount;
 
@@ -280,7 +306,76 @@ contract ERC20PermitInlineAssembly {
 
         emit Transfer(from, to, amount);
 
-        return true;
+        return true;  */
+
+        assembly {
+            let fmp := mload(0x40)
+
+            mstore(fmp, from)
+            mstore(add(fmp, 0x20), _allowance.slot)
+            let allowancesOwnerSlot := keccak256(fmp, 0x40)
+            
+            fmp := add(fmp, 0x40)
+            mstore(fmp, caller())
+            mstore(add(fmp, 0x20), allowancesOwnerSlot)
+
+            let userAllowanceSlot := keccak256(fmp, 0x40)
+            let userAllowance := sload(userAllowanceSlot)
+
+            // require(allowance(from, msg.sender) >= amount, "Not enough allowance");
+            if lt(userAllowance, amount) {  // not enough allowance, revert
+                mstore(fmp, 0x08c379a0)  // function selector for Error(string)
+                mstore(add(fmp, 0x20), 0x20)  // string offset
+                mstore(add(fmp, 0x40), 0x14)  // length("Not enough allowance") = 20 bytes -> 0x14
+                mstore(add(fmp, 0x60), 0x4e6f7420656e6f75676820616c6c6f77616e6365000000000000000000000000)  // "Not enough allowance"
+                revert(add(fmp, 0x1c), sub(0x80, 0x1c))  // starts in the function selector bytes, which start at (fmp + 28bytes) 
+            }
+
+            // decrease allowance
+            sstore(userAllowanceSlot, sub(userAllowance, amount))            
+            
+            //
+            // Transfer logic 
+            //
+            fmp := add(fmp, 0x40)
+
+            mstore(fmp, from)
+            mstore(add(fmp, 0x20), _balanceOf.slot)  // to have concatenation (from . slot)
+
+            let fromBalanceSlot := keccak256(fmp, 0x40)
+            let fromBalance := sload(fromBalanceSlot)
+
+            // require(balanceOf(from) >= amount, "Not enough funds");
+            if lt(fromBalance, amount) {
+                mstore(fmp, 0x08c379a0)  // function selector for Error(string)
+                mstore(add(fmp, 0x20), 0x20)  // string offset
+                mstore(add(fmp, 0x40), 0x10)  // length("Not enough funds") = 16 bytes -> 0x10
+                mstore(add(fmp, 0x60), 0x4e6f7420656e6f7567682066756e647300000000000000000000000000000000)  // "Not enough funds"
+                revert(add(fmp, 0x1c), sub(0x80, 0x1c))  // starts in the function selector bytes, which start at (fmp + 28bytes) 
+            }
+
+            sstore(fromBalanceSlot, sub(fromBalance, amount))  // update from balance
+
+            mstore(fmp, to)  // to change concatenation to (to . slot)
+            sstore(keccak256(fmp, 0x40), amount)  // update to balance
+
+            // Emit event Transfer(address indexed from, address indexed to, uint256 amount)
+            let amountPointer := add(fmp, 0x40)
+            mstore(amountPointer, amount)
+            // hash string is keccak256("Transfer(address,address,uint256)")
+            log3(
+                amountPointer,
+                0x20,
+                0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef,
+                from,
+                to
+            )
+
+            // Return true
+            let returnPointer := add(amountPointer, 0x20)
+            mstore(returnPointer, 0x01)
+            return(returnPointer, 0x20)
+        }
     }
 
     function mint(address to, uint256 amount) external {

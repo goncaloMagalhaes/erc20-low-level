@@ -5,6 +5,7 @@ import "forge-std/Test.sol";
 import "../src/ERC20PermitInlineAssembly.sol";
 
 contract ERC20PermitInlineAssemblyTest is Test {
+    event Transfer(address indexed from, address indexed to, uint256 amount);
     event Approval(address indexed owner, address indexed spender, uint256 amount);
 
     address eoa = address(100);
@@ -62,6 +63,137 @@ contract ERC20PermitInlineAssemblyTest is Test {
 
         assertEq(erc20.allowance(eoa, otherUser), amountMintEoa);
 
+        vm.stopPrank();
+    }
+
+    function testTransferSuccess() public {
+        address otherUser = address(200);
+        uint amountTransfer = 1 gwei;
+        vm.startPrank(eoa);
+
+        assertEq(erc20.balanceOf(eoa), amountMintEoa);
+        assertEq(erc20.balanceOf(otherUser), 0);
+        
+        vm.expectEmit(true, true, false, true);
+        emit Transfer(eoa, otherUser, amountTransfer);
+        
+        erc20.transfer(otherUser, amountTransfer);
+
+        assertEq(erc20.balanceOf(eoa), amountMintEoa - amountTransfer);
+        assertEq(erc20.balanceOf(otherUser), amountTransfer);
+
+        vm.stopPrank();
+    }
+
+    function testTransferUnderflow() public {
+        address otherUser = address(200);
+        uint amountTransfer = 1 gwei + amountMintEoa;
+        vm.startPrank(eoa);
+
+        assertEq(erc20.balanceOf(eoa), amountMintEoa);
+        assertEq(erc20.balanceOf(otherUser), 0);
+        
+        vm.expectRevert("Not enough funds");        
+        erc20.transfer(otherUser, amountTransfer);
+
+        // balances should remain the same
+        assertEq(erc20.balanceOf(eoa), amountMintEoa);
+        assertEq(erc20.balanceOf(otherUser), 0);
+
+        vm.stopPrank();
+    }
+
+    function testTransferFromSuccess() public {
+        address spender = address(200);
+        address otherUser = address(300);
+        uint amountTransfer = 1 gwei;
+
+        //
+        // add allowance
+        //
+        vm.startPrank(eoa);
+
+        vm.expectEmit(true, true, false, true);
+        emit Approval(eoa, spender, amountMintEoa);
+        
+        erc20.approve(spender, amountMintEoa);
+
+        assertEq(erc20.allowance(eoa, spender), amountMintEoa);
+
+        vm.stopPrank();
+
+        //
+        // use transferFrom
+        // 
+        vm.startPrank(spender);
+
+        assertEq(erc20.balanceOf(eoa), amountMintEoa);
+        assertEq(erc20.balanceOf(otherUser), 0);
+        
+        vm.expectEmit(true, true, false, true);
+        emit Transfer(eoa, otherUser, amountTransfer);
+        
+        erc20.transferFrom(eoa, otherUser, amountTransfer);
+
+        assertEq(erc20.balanceOf(eoa), amountMintEoa - amountTransfer);
+        assertEq(erc20.balanceOf(otherUser), amountTransfer);
+
+        // check allowance change
+        assertEq(erc20.allowance(eoa, spender), amountMintEoa - amountTransfer);
+
+        vm.stopPrank();
+    }
+
+    
+    function testTransferFromReverts() public {
+        address spender = address(200);
+        address otherUser = address(300);
+        uint amountTransfer = 1 gwei + amountMintEoa;
+
+        //
+        // Try transfering with no allowance
+        //
+        vm.startPrank(spender);
+
+        assertEq(erc20.balanceOf(eoa), amountMintEoa);
+        assertEq(erc20.balanceOf(otherUser), 0);
+        
+        vm.expectRevert("Not enough allowance");        
+        erc20.transferFrom(eoa, otherUser, amountTransfer);
+
+        // balances should remain the same
+        assertEq(erc20.balanceOf(eoa), amountMintEoa);
+        assertEq(erc20.balanceOf(otherUser), 0);
+
+        vm.stopPrank();
+
+        //
+        // add allowance
+        //
+        vm.startPrank(eoa);
+
+        vm.expectEmit(true, true, false, true);
+        emit Approval(eoa, spender, amountTransfer);
+        
+        erc20.approve(spender, amountTransfer);
+
+        assertEq(erc20.allowance(eoa, spender), amountTransfer);
+
+        vm.stopPrank();
+
+        //
+        // Try transfering more than eoa ballance
+        // 
+        vm.startPrank(spender);
+        
+        vm.expectRevert("Not enough funds");        
+        erc20.transferFrom(eoa, otherUser, amountTransfer);
+
+        // balances should remain the same
+        assertEq(erc20.balanceOf(eoa), amountMintEoa);
+        assertEq(erc20.balanceOf(otherUser), 0);
+
+        vm.stopPrank();
         vm.stopPrank();
     }
 }
