@@ -23,13 +23,21 @@ contract ERC20PermitInlineAssembly {
     event Transfer(address indexed from, address indexed to, uint256 amount);
     event Approval(address indexed owner, address indexed spender, uint256 amount);
 
+    /** ownership */
+    address private _owner;
+
+    /** ERC20 metadata */
     string private _name;
     string private _symbol;
     uint8 private _decimals;
 
+    /** ERC20 */
     uint256 private _totalSupply;
     mapping(address => uint256) private _balanceOf;
     mapping(address => mapping(address => uint256)) private _allowance;
+
+    /** ERC20-Permit */
+    mapping(address => uint256) private _nonces;
 
     constructor(string memory __name, string memory __symbol, uint8 __decimals) {
         assembly {
@@ -82,6 +90,9 @@ contract ERC20PermitInlineAssembly {
 
             // _decimals
             sstore(_decimals.slot, __decimals)  // easy stuff, contrary to strings...
+
+            // _owner
+            sstore(_owner.slot, caller())
         }
     }
 
@@ -292,22 +303,6 @@ contract ERC20PermitInlineAssembly {
         address to,
         uint256 amount
     ) public returns (bool) {
-        /* uint256 allowed = _allowance[from][msg.sender]; // Saves gas for limited approvals.
-
-        if (allowed != type(uint256).max) _allowance[from][msg.sender] = allowed - amount;
-
-        _balanceOf[from] -= amount;
-
-        // Cannot overflow because the sum of all user
-        // balances can't exceed the max uint256 value.
-        unchecked {
-            _balanceOf[to] += amount;
-        }
-
-        emit Transfer(from, to, amount);
-
-        return true;  */
-
         assembly {
             let fmp := mload(0x40)
 
@@ -379,34 +374,225 @@ contract ERC20PermitInlineAssembly {
     }
 
     function mint(address to, uint256 amount) external {
-        _mint(to, amount);
+        assembly {
+            let owner := sload(_owner.slot)
+            let fmp := mload(0x40)
+
+            // require(_owner == msg.sender, "Not owner");
+            if iszero(eq(owner, caller())) {
+                mstore(fmp, 0x08c379a0)  // function selector for Error(string)
+                mstore(add(fmp, 0x20), 0x20)  // string offset
+                mstore(add(fmp, 0x40), 0x09)  // length("Not owner") = 9 bytes -> 0x09
+                mstore(add(fmp, 0x60), 0x4e6f74206f776e65720000000000000000000000000000000000000000000000)  // "Not owner"
+                revert(add(fmp, 0x1c), sub(0x80, 0x1c))  // starts in the function selector bytes, which start at (fmp + 28bytes) 
+            }
+
+            let totalSupplyMem := sload(_totalSupply.slot)
+            if gt(totalSupplyMem, add(totalSupplyMem, amount)) {  // overflow
+                mstore(fmp, 0x08c379a0)  // function selector for Error(string)
+                mstore(add(fmp, 0x20), 0x20)  // string offset
+                mstore(add(fmp, 0x40), 0x15)  // length("Total supply overflow") = 21 bytes -> 0x15
+                mstore(add(fmp, 0x60), 0x546f74616c20737570706c79206f766572666c6f770000000000000000000000)  // "Total supply overflow"
+                revert(add(fmp, 0x1c), sub(0x80, 0x1c))  // starts in the function selector bytes, which start at (fmp + 28bytes) 
+            }
+
+            // increase totalSupply
+            sstore(_totalSupply.slot, add(totalSupplyMem, amount))
+            
+            mstore(fmp, to)
+            mstore(add(fmp, 0x20), _balanceOf.slot)
+
+            let toBalanceSlot := keccak256(fmp, 0x40)
+            // increase to balance
+            sstore(toBalanceSlot, add(sload(toBalanceSlot), amount))
+            
+            // Emit event Transfer(address indexed from, address indexed to, uint256 amount)
+            let amountPointer := add(fmp, 0x40)
+            mstore(amountPointer, amount)
+            // hash string is keccak256("Transfer(address,address,uint256)")
+            log3(
+                amountPointer,
+                0x20,
+                0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef,
+                0x00,
+                to
+            )
+        }
     }
 
-    /*//////////////////////////////////////////////////////////////
-                        INTERNAL MINT/BURN LOGIC
-    //////////////////////////////////////////////////////////////*/
+    function permit(
+        address owner,
+        address spender,
+        uint256 value,
+        uint256 deadline,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    ) public {
+        assembly {
+            let fmp := mload(0x40)
 
-    function _mint(address to, uint256 amount) internal {
-        _totalSupply += amount;
+            // require(block.timestamp <= deadline, "ERC20Permit: expired deadline");
+            if gt(timestamp(), deadline) {
+                mstore(fmp, 0x08c379a0)
+                mstore(add(fmp, 0x20), 0x20)
+                mstore(add(fmp, 0x40), 0x1d)  // length("ERC20Permit: expired deadline") = 29 bytes -> 0x1d
+                mstore(add(fmp, 0x60), 0x45524332305065726d69743a206578706972656420646561646c696e65000000)  // "ERC20Permit: expired deadline"
+                revert(add(fmp, 0x1c), sub(0x80, 0x1c))  // starts in the function selector bytes, which start at (fmp + 28bytes) 
+            }
 
-        // Cannot overflow because the sum of all user
-        // balances can't exceed the max uint256 value.
-        unchecked {
-            _balanceOf[to] += amount;
+            //
+            // FETCH _name TO HASH IT. 
+            // keccak256(bytes(_name)) --> this is hashing only the data bytes of the string
+            //
+            let memNameSize
+            let memNameSlot
+            mstore(fmp, sload(_name.slot))
+            switch and(mload(fmp), 0x01)
+            case 0x01 { // string greater than 32 bytes
+                let length := div(sub(mload(fmp), 1), 2)
+                mstore(fmp, _name.slot)
+                let start := keccak256(fmp, 0x20)
+                for 
+                    { let i := 0 }
+                    lt(i, add(div(length, 0x20), 1))
+                    { i := add(i, 1) }
+                {
+                    mstore(
+                        add(fmp, mul(i, 0x20)),
+                        sload(add(start, i))
+                    )
+                }
+                memNameSlot := fmp
+                memNameSize := length
+            }
+            default { // length < 32 bytes
+                memNameSlot := add(fmp, 0x20)
+                mstore(memNameSlot, and(not(0xff), mload(fmp))) // data
+                memNameSize := div(and(0xff, mload(fmp)), 2)  // length
+            }
+            
+            let hashedName := keccak256(memNameSlot, memNameSize)
+
+            fmp := add(memNameSlot, mul(add(div(memNameSize, 0x20), 1), 0x20))  // advance fmp properly
+            // useNonce --> fetch current and increment storage nonce
+            mstore(fmp, owner)
+            mstore(add(fmp, 0x20), _nonces.slot)
+
+            let nonceSlot := keccak256(fmp, 0x40)
+            let currentNonce := sload(nonceSlot)
+            // increase nonce for next usage
+            sstore(nonceSlot, add(currentNonce, 1))
+
+            fmp := add(fmp, 0x40)
+
+            // bytes32 structHash = keccak256(abi.encode(_PERMIT_TYPEHASH, owner, spender, value, _useNonce(owner), deadline));
+            // keccak256("Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)")
+            mstore(fmp, 0x6e71edae12b1b97f4d1f60370fef10105fa2faae0126114a169c64845d6126c9)
+            mstore(add(fmp, 0x20), owner)
+            mstore(add(fmp, 0x40), spender)
+            mstore(add(fmp, 0x60), value)
+            mstore(add(fmp, 0x80), currentNonce)
+            mstore(add(fmp, 0xa0), deadline)
+
+            let structHash := keccak256(fmp, 0xc0)
+
+            // keccak256(bytes("1"))
+            let hashedVersion := 0xc89efdaa54c0f20c7adf612882df0950f5a951637e0307cdcb4c672f298b8bc6
+            // keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)")
+            let typeHash := 0x8b73c3c69bb8fe3d512ecc4cf759cc79239f7b179b0ffacaa9a75d522b39400f
+
+            // keccak256(abi.encode(typeHash, hashedName, hashedVersion, block.chainid, address(this)))
+            fmp := add(fmp, 0xc0)
+            mstore(fmp, typeHash)
+            mstore(add(fmp, 0x20), hashedName)
+            mstore(add(fmp, 0x40), hashedVersion)
+            mstore(add(fmp, 0x60), chainid())
+            mstore(add(fmp, 0x80), address())
+
+            let domainSeparator := keccak256(fmp, 0xa0)
+
+            // keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash))
+            // encodePacked --> 0x1901 is immediatelly followed by domainSeparator bytes
+            fmp := add(fmp, 0xa0)
+            mstore(fmp, 0x1901)  // this is stored in least significant bytes
+            mstore(add(fmp, 0x20), domainSeparator)
+            mstore(add(fmp, 0x40), structHash)
+
+            let finalHash := keccak256(add(fmp, 0x1e), 0x42)  // starts in two least significant bytes in fmp 32bytes word
+
+            fmp := add(fmp, 0x60)
+
+            // checks signature malleability
+            if gt(s, 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0) {
+                // revert("Invalid signature 's' value");
+                mstore(fmp, 0x08c379a0)
+                mstore(add(fmp, 0x20), 0x20)
+                mstore(add(fmp, 0x40), 0x1b)  // length("Invalid signature 's' value") = 27 bytes -> 0x1b
+                mstore(add(fmp, 0x60), 0x496e76616c6964207369676e6174757265202773272076616c75650000000000)  // "Invalid signature 's' value"
+                revert(add(fmp, 0x1c), sub(0x80, 0x1c))  // starts in the function selector bytes, which start at (fmp + 28bytes) 
+            }
+
+            // address signer = ecrecover(finalHash, v, r, s);
+            // ecrecover is a hardcoded contract at address 0x01
+            mstore(fmp, finalHash)
+            mstore(add(fmp, 0x20), v)
+            mstore(add(fmp, 0x40), r)
+            mstore(add(fmp, 0x60), s)
+            
+            if iszero(staticcall(not(0), 0x01, fmp, 0x80, fmp, 0x20)) {
+                // revert("Invalid signature");
+                fmp := add(fmp, 0x80)
+                mstore(fmp, 0x08c379a0)
+                mstore(add(fmp, 0x20), 0x20)
+                mstore(add(fmp, 0x40), 0x11)  // length("Invalid signature") = 17 bytes -> 0x11
+                mstore(add(fmp, 0x60), 0x496e76616c6964207369676e6174757265000000000000000000000000000000)  // "Invalid signature"
+                revert(add(fmp, 0x1c), sub(0x80, 0x1c))  // starts in the function selector bytes, which start at (fmp + 28bytes) 
+            }
+
+            let returnSize := returndatasize()
+            fmp := add(fmp, 0x80)
+            returndatacopy(fmp, 0, returnSize)
+
+            // require(signer == owner, "Invalid signature");
+            if iszero(eq(owner, mload(fmp))) {
+                mstore(fmp, 0x08c379a0)
+                mstore(add(fmp, 0x20), 0x20)
+                mstore(add(fmp, 0x40), 0x11)  // length("Invalid signature") = 17 bytes -> 0x11
+                mstore(add(fmp, 0x60), 0x496e76616c6964207369676e6174757265000000000000000000000000000000)  // "Invalid signature"
+                revert(add(fmp, 0x1c), sub(0x80, 0x1c))  // starts in the function selector bytes, which start at (fmp + 28bytes) 
+            }
+
+            // If code reaches this point, signature is valid
+
+            //
+            // approve logic
+            //
+            fmp := add(fmp, 0x20)
+            
+            mstore(fmp, owner)
+            mstore(add(fmp, 0x20), _allowance.slot)  // 0x20 is 32bytes, concatenates slot after owner
+            
+            let spenderPointer := add(fmp, 0x40)
+            mstore(spenderPointer, spender)
+            mstore(add(spenderPointer, 0x20), keccak256(fmp, 0x40))
+
+            // slot of _allowance[owner][spender] --> keccak256(abi.encode(spender, _allowance[owner].slot))
+            let slot := keccak256(spenderPointer, 0x40)
+
+            sstore(slot, value)  // store in right place
+
+            // Emit event Approval(address indexed owner, address indexed spender, uint256 amount)
+            let amountPointer := add(spenderPointer, 0x40)
+            mstore(amountPointer, value)
+            // hash string is keccak256("Approval(address,address,uint256)")
+            log3(
+                amountPointer,
+                0x20,
+                0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925,
+                owner,
+                spender
+            )
         }
-
-        emit Transfer(address(0), to, amount);
-    }
-
-    function _burn(address from, uint256 amount) internal {
-        _balanceOf[from] -= amount;
-
-        // Cannot underflow because a user's balance
-        // will never be larger than the total supply.
-        unchecked {
-            _totalSupply -= amount;
-        }
-
-        emit Transfer(from, address(0), amount);
     }
 }

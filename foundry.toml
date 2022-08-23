@@ -3,7 +3,8 @@ src = 'src'
 out = 'out'
 libs = ['lib']
 
-optimizer = false
+optimizer = true
 verbosity = 4
+#via-ir = true
 
 # See more config options https://github.com/foundry-rs/foundry/tree/master/config
