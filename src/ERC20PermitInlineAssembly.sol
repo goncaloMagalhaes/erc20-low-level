@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import "forge-std/console2.sol";
-
 /**
     NOTE on strings: STRING STORAGE CHECK between <32bytes and >=32bytes, according to docs:
     "In particular: if the data is at most 31 bytes long, the elements are stored 
